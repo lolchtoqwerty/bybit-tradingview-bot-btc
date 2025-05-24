@@ -41,10 +41,10 @@ def http_get(path: str, params: dict = None):
     ts, sign = sign_request(query=query)
     headers = {
         "Content-Type":      "application/json",
-        "X-BAPI-API-KEY":     BYBIT_API_KEY,
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-        "X-BAPI-SIGN":        sign
+        "X-BAPI-API-KEY":    BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP":  ts,
+        "X-BAPI-RECV-WINDOW":RECV_WINDOW,
+        "X-BAPI-SIGN":       sign
     }
     resp = requests.get(url, headers=headers, params=params)
     logger.debug(f"GET {path}?{query} → {resp.status_code} {resp.text}")
@@ -56,10 +56,10 @@ def http_post(path: str, body: dict):
     ts, sign = sign_request(payload_str=payload_str)
     headers = {
         "Content-Type":      "application/json",
-        "X-BAPI-API-KEY":     BYBIT_API_KEY,
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-        "X-BAPI-SIGN":        sign
+        "X-BAPI-API-KEY":    BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP":  ts,
+        "X-BAPI-RECV-WINDOW":RECV_WINDOW,
+        "X-BAPI-SIGN":       sign
     }
     resp = requests.post(url, headers=headers, data=payload_str)
     logger.debug(f"POST {path} {payload_str} → {resp.status_code} {resp.text}")
@@ -77,6 +77,10 @@ def get_symbol_info(symbol: str):
 
 def get_ticker_price(symbol: str) -> float:
     return float(http_get("v5/market/tickers", {"category":"linear","symbol":symbol}).json()["result"]["list"][0]["lastPrice"])
+
+def get_positions(symbol: str):
+    data = http_get("v5/position/list", {"category":"linear","symbol":symbol}).json()
+    return data.get("result", {}).get("list", [])
 
 def get_executions(symbol: str, order_id: str):
     return http_get("v5/execution/list", {"category":"linear","symbol":symbol,"orderId":order_id}).json()["result"]["list"]
@@ -100,7 +104,11 @@ def webhook():
 
     # Открытие лонга
     if side_cmd == 'buy':
-        set_leverage(symbol)
+        # Устанавливаем плечо
+        http_post("v5/position/set-leverage", {
+            "category":"linear","symbol":symbol,
+            "buy_leverage": LONG_LEVERAGE, "position_idx":0
+        })
         balance = get_wallet_balance()
         min_q, step = get_symbol_info(symbol)
         price = get_ticker_price(symbol)
@@ -118,25 +126,25 @@ def webhook():
         ) if execs else price
         pct = (qty * avg_price / LONG_LEVERAGE) / balance * 100 if balance>0 else 0
         txt = (
-            f"Лонг: {symbol}\n"
+            f"Лонг открыт: {symbol}\n"
             f"Цена входа: {avg_price:.4f}\n"
-            f"Процент от депозита: {pct:.2f}%\n"
+            f"Риск: {pct:.2f}% от депозита\n"
             f"Плечо: {LONG_LEVERAGE}×"
         )
         send_telegram(txt)
         return {"status":"ok"}
 
-    # Закрытие позиции
+    # Закрытие лонга
     if side_cmd == 'exit':
         positions = get_positions(symbol)
         original = next(
-            ((p['side'], float(p['size']), float(p['avgPrice']))
-             for p in positions if p['side']=='Buy' and float(p['size'])>0),
+            (p for p in positions if p['side']=='Buy' and float(p['size'])>0),
             None
         )
         if not original:
             return {"status":"no_position"}
-        _, qty, entry_price = original
+        qty = float(original['size'])
+        entry_price = float(original['avgPrice'])
         balance_before = get_wallet_balance()
         res = http_post("v5/order/create", {
             "category":"linear","symbol":symbol,
@@ -153,18 +161,14 @@ def webhook():
         fee = sum(float(e.get('execFee',0)) for e in execs)
         net_pnl = pnl - fee
         pct_change = net_pnl / balance_before * 100 if balance_before>0 else 0
-        txt = f"Лонг закрыт: {symbol}\nИзменение баланса: {pct_change:+.2f}%"
+        txt = (
+            f"Лонг закрыт: {symbol}\n"
+            f"PnL: {net_pnl:.4f} USDT ({pct_change:+.2f}%)"
+        )
         send_telegram(txt)
         return {"status":"ok"}
 
     return {"status":"ignored"}
-
-def set_leverage(symbol: str):
-    # Устанавливаем 3× плечо на лонг-позиции
-    return http_post("v5/position/set-leverage", {
-        "category":"linear","symbol":symbol,
-        "buy_leverage": LONG_LEVERAGE, "position_idx":0
-    })
 
 if __name__=='__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT',10000)))
