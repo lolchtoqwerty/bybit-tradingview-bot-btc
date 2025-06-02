@@ -133,6 +133,7 @@ def webhook():
     if side_cmd == 'buy':
         # Set leverage
         logger.info(f"Setting leverage {LONG_LEVERAGE}× for {symbol}")
+        # Only send buy_leverage, remove sell_leverage entirely
         http_post("v5/position/set-leverage", {
             "category":    "linear",
             "symbol":      symbol,
